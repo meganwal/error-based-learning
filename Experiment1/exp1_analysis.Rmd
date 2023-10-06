@@ -1,0 +1,497 @@
+---
+title: "Experiment 1 analysis"
+output: html_document
+---
+
+```{r load-libraries, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(readxl)
+library(here)
+library(tidyboot)
+library(lme4)
+library(lmerTest)
+library(broom)
+library(broom.mixed)
+library(ggthemes)
+library(knitr)
+library(papaja)
+library(dplyr)
+library(irr)
+library(effectsize)
+```
+
+### Load in file
+```{r}
+tidy_final <- read.csv(here("Experiment1/exp1_clean.csv"))
+```
+
+```{r error-rates}
+error_rates <- tidy_final %>%
+  filter(Section %in% c("trial1", "trial2")) %>%
+  filter(!is.na(Num_Error)) %>%
+  group_by(Subject) %>%
+  summarise(Num_Error= mean(Num_Error=="yes"), 
+            Lex_Error = mean(Lex_Error == "yes")) %>%
+  arrange(desc(Num_Error)) %>%
+  filter(Num_Error > 0.5)
+
+majority_error_subjects <- error_rates$Subject
+
+tidy_transcripts <- tidy_final %>% 
+  filter(!(Subject %in% majority_error_subjects))
+
+n_children_final <- n_distinct(tidy_transcripts$Subject)
+```
+
+# Analyses with final sample
+(excluding subjects who failed to follow directions)
+
+### Bootstrap mean error rates for each trial type across conditions
+```{r bootstrap-descriptives}
+boot_all <- tidy_transcripts %>%
+  filter(Plural_Error != "NA") %>%
+  filter(Type == "IP") %>%
+  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), labels = c("pre", "block1","block2", "post")))%>%
+  group_by(Condition, Section, Type, Subject) %>%
+  filter(Lex_Error == "no") %>%
+  summarise(Plural_Error= mean(Plural_Error=="yes")) %>%
+  tidyboot_mean(Plural_Error) 
+```
+
+```{r plot-condition}
+ggplot(boot_all, aes(x=Section, y=empirical_stat, fill=Condition)) +
+  geom_col(position = position_dodge(.5),
+           width = .5) +
+  geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
+                 position=position_dodge(.5)) +
+  ylab("Overregularization (prop.)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        legend.position = "top") + 
+  xlab("") + 
+  scale_fill_ptol()
+```
+
+```{r by_word analyses}
+word_analyses <- tidy_transcripts %>%
+  filter(Plural_Error != "NA") %>%
+  filter(Type == "IP") %>%
+  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), labels = c("pre", "block1","block2", "post"))) %>%
+  group_by(target) %>%
+  filter(Lex_Error == "no", Section == "pre" | Section == "post") %>%
+  select(target, Plural_Error, Section, Condition, Subject) %>%
+  group_by(Section, target, Condition) %>%
+  summarise(Plural_Error= mean(Plural_Error=="yes")) %>%
+  group_by(target) %>%
+  pivot_wider(names_from = Section, values_from = Plural_Error) %>%
+  mutate(Change = post - pre)
+```
+
+```{r}
+condition_count <- tidy_transcripts %>%
+  group_by(Subject, Condition) %>%
+  filter(Condition == "Reformulation") %>%
+  tally()
+```
+
+
+### Modeling performance on training and post-test from pretest performance for each condition
+```{r trial-models}
+trial_data <- tidy_transcripts %>%
+  filter(Plural_Error != "NA") %>%
+  filter(Type == "IP") %>%
+  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post")),
+         Condition = factor(Condition, levels = c("Repetition", "Reformulation")), 
+         Plural_Error = factor(Plural_Error, levels = c("no", "yes")))%>%
+  group_by(Condition, Section, Type, Subject) %>%
+  filter(Lex_Error == "no")
+
+contrasts(trial_data$Condition) <- c(-0.5,0.5)
+
+compare_pre <- glmer(Plural_Error ~ Condition + (1 | Subject) + (1|target),  
+                             family = "binomial", 
+                             data = trial_data %>% 
+                               filter(Section == "pre")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+compare_pre
+
+
+reformulation_model <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target),  
+                             family = "binomial", 
+                             data = trial_data %>% 
+                               filter(Condition == "Reformulation")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+reformulation_model
+
+repetition_model <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target), 
+                             family = "binomial", 
+                             data = trial_data %>% 
+                               filter(Condition == "Repetition")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+repetition_model
+
+both_model <- glmer(Plural_Error ~ Section * Condition + (1 | Subject) + (1|target), 
+                             family = "binomial", 
+                             data = trial_data) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+both_model
+```
+
+### Model predicting performance by condition and pretest performance
+```{r overall-learning}
+pre_post <- trial_data %>%
+  filter(Section %in% c("pre", "post")) %>%
+  mutate(Section = factor(Section, levels = c("pre","post")))
+
+pre_post_matched <- pre_post %>%
+  select(Subject, Condition, Section, Type, Plural_Error, target) %>%
+  group_by(Subject, target) %>%
+  pivot_wider(names_from = Section, values_from = Plural_Error)
+
+pre_to_post <- glmer(post ~ pre + Condition + (1|Subject) + (1|target),
+                     family = "binomial", data = pre_post_matched)
+
+pre_to_post %>% summary()
+```
+
+### Interaction Model
+```{r}
+contrasts(pre_post$Condition) <- c(-0.5,0.5)
+
+overall_model <- pre_post %>%
+  glmer(Plural_Error ~ Section * Condition 
+                       + (1 | Subject) + (1 | target),
+                       family = "binomial", data = .) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect, -group) %>%
+  mutate(p.value = printp(p.value),
+         d = round(oddsratio_to_d(estimate, log = TRUE), 2),
+         d_high = round(oddsratio_to_d(estimate + 1.96 * std.error, log = TRUE), 2),
+         d_low = round(oddsratio_to_d(estimate - 1.96 * std.error, log = TRUE), 2))
+
+
+overall_model %>% summary()
+```
+
+# Analyses without "leaves
+
+```{r}
+no_leaves <- trial_data %>%
+  filter(target != "leaves")
+ 
+contrasts(no_leaves$Condition) <- c(-0.5,0.5)
+
+compare_pre_leaves <- glmer(Plural_Error ~ Condition + (1 | Subject) + (1|target),  
+                             family = "binomial", 
+                             data = no_leaves %>% 
+                               filter(Section == "pre")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+compare_pre_leaves
+
+
+reformulation_model_leaves <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target),  
+                             family = "binomial", 
+                             data = no_leaves %>% 
+                               filter(Condition == "Reformulation")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+reformulation_model_leaves
+
+repetition_model_leaves <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target), 
+                             family = "binomial", 
+                             data = no_leaves %>% 
+                               filter(Condition == "Repetition")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+repetition_model_leaves
+
+both_model_leaves <- glmer(Plural_Error ~ Section * Condition + (1 | Subject) + (1|target), 
+                             family = "binomial", 
+                             data = no_leaves) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+both_model_leaves
+```
+```{r overall-learning-no-leaves}
+pre_post_leaves <- no_leaves %>%
+  filter(Section %in% c("pre", "post")) %>%
+  mutate(Section = factor(Section, levels = c("pre","post")))
+
+pre_post_matched_leaves <- pre_post_leaves %>%
+  select(Subject, Condition, Section, Type, Plural_Error, target) %>%
+  group_by(Subject, target) %>%
+  pivot_wider(names_from = Section, values_from = Plural_Error)
+
+pre_to_post_leaves <- glmer(post ~ pre + Condition + (1|Subject) + (1|target),
+                     family = "binomial", data = pre_post_matched)
+
+pre_to_post_leaves %>% summary()
+```
+
+# Analyses with all participants
+
+```{r}
+boot_complete <- tidy_final %>%
+  filter(Plural_Error != "NA") %>%
+  filter(Type == "IP") %>%
+  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), labels = c("pre", "block1","block2", "post")))%>%
+  group_by(Condition, Section, Type, Subject) %>%
+  filter(Lex_Error == "no") %>%
+  summarise(Plural_Error= mean(Plural_Error=="yes")) %>%
+  tidyboot_mean(Plural_Error) 
+```
+
+```{r}
+ggplot(boot_complete, aes(x=Section, y=empirical_stat, fill=Condition)) +
+  geom_col(position = position_dodge(.5),
+           width = .5) +
+  geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
+                 position=position_dodge(.5)) +
+  ylab("Overregularization (prop.)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        legend.position = "top") + 
+  xlab("") + 
+  scale_fill_ptol()
+```
+
+```{r trial-models-complete}
+trial_data_complete <- tidy_final %>%
+  filter(Plural_Error != "NA") %>%
+  filter(Type == "IP") %>%
+  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post")),
+         Plural_Error = factor(Plural_Error, levels = c("no", "yes")))%>%
+  group_by(Condition, Section, Type, Subject) %>%
+  filter(Lex_Error == "no")
+
+compare_pre_complete <- glmer(Plural_Error ~ Condition + (1 | Subject) + (1|target),  
+                             family = "binomial", 
+                             data = trial_data_complete %>% 
+                               filter(Section == "pre")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+compare_pre_complete
+
+
+reformulation_model_complete <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target),  
+                             family = "binomial", 
+                             data = trial_data_complete %>% 
+                               filter(Condition == "Reformulation")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+reformulation_model_complete
+
+repetition_model_complete <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target), 
+                             family = "binomial", 
+                             data = trial_data_complete %>% 
+                               filter(Condition == "Repetition")) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+repetition_model_complete
+
+both_model_complete <- glmer(Plural_Error ~ Section * Condition + (1 | Subject) + (1|target), 
+                             family = "binomial", 
+                             data = trial_data_complete) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect,-group) %>%
+  mutate(p.value = papaja::printp(p.value))
+
+both_model_complete
+```
+
+### Model predicting performance by condition and pretest performance
+```{r pre-post-model-complete}
+pre_post_complete <- trial_data_complete %>%
+  filter(Section %in% c("pre", "post")) %>%
+  mutate(Section = factor(Section, levels = c("pre","post")))
+
+pre_post_complete <- pre_post %>%
+  select(Subject, Condition, Section, Type, Plural_Error, target) %>%
+  group_by(Subject, target) %>%
+  pivot_wider(names_from = Section, values_from = Plural_Error)
+
+pre_to_post_complete <- glmer(post ~ pre + Condition + (1|Subject) + (1|target),
+                     family = "binomial", data = pre_post_matched)
+
+pre_to_post_complete %>% summary()
+```
+
+Interaction Model
+```{r overall-learning-complete}
+overall_model_complete <- tidy_final %>% 
+  filter(Type == "IP", Lex_Error == "no") %>%
+  mutate(Plural_Error = factor(Plural_Error, levels = c("no", "yes")),
+         Section = factor(Section, levels = c("pre", "post")),
+         Condition = factor(Condition, 
+                            levels = c("Repetition", "Reformulation"))) %>%
+  glmer(Plural_Error ~ Section * Condition 
+                       + (1 | Subject) + (1 | target),
+                       family = "binomial", data = .) %>%
+  tidy() %>%
+  filter(effect == "fixed") %>%
+  select(-effect, -group) %>%
+  mutate(p.value = printp(p.value),
+         d = round(oddsratio_to_d(estimate, log = TRUE), 2),
+         d_high = round(oddsratio_to_d(estimate + 1.96 * std.error, log = TRUE), 2),
+         d_low = round(oddsratio_to_d(estimate - 1.96 * std.error, log = TRUE), 2))
+
+
+overall_model_complete
+```
+
+Exploratory and extra analyses
+```{r}
+#e2 ~ e1 * condition + (e1 | subj) + (1| word) + (1|order)
+# model_data <- tidy_transcripts %>%
+#   select(-carrier, -trial, -Transcription, -Time_Stamp, -Notes, -row) %>%
+#   pivot_wider(names_from = "Section", values_from = "Plural_Error") %>%
+#   mutate(post = factor(post, levels = c("no", "yes")),
+#          pre = factor(pre, levels = c("no", "yes")),
+#          Type = factor(Type, levels = c("RP", "IP")),
+#         Condition = factor(Condition,levels=c("Repetition","Reformulation"))) 
+
+#doesn't converge
+# pre_post_max_model <- glmer(post ~ pre * Condition + (pre|Subject) +
+#                               (1|target) + (1|Order),
+#         family="binomial", data = model_data)
+
+
+# pre_post_final_model <- glmer(post ~ pre * Condition * Type + (1|Subject) ,
+#         family="binomial", data = model_data) %>%
+#   tidy() %>%
+#   filter(effect == "fixed") %>%
+#   select(-effect, -group) %>%
+#   mutate(p.value = printp(p.value),
+#          d = round(oddsratio_to_d(estimate, log = TRUE), 2),
+#          d_high = round(oddsratio_to_d(estimate + 1.96 * std.error, log = TRUE), 2),
+#          d_low = round(oddsratio_to_d(estimate - 1.96 * std.error, log = TRUE), 2))
+# 
+# pre_post_final_model
+```
+
+
+```{r IP Model}
+# pre_post_ip_model <- glmer(post ~ pre * Condition + (1|Subject) ,
+#                            family="binomial", data = model_data %>% 
+#   filter(Type == "IP")) %>%
+#   tidy() %>%
+#   filter(effect == "fixed") %>%
+#   select(-effect, -group) %>%
+#   mutate(p.value = printp(p.value),
+#          d = round(oddsratio_to_d(estimate, log = TRUE), 2),
+#          d_high = round(oddsratio_to_d(estimate + 1.96 * std.error, log = TRUE), 2),
+#          d_low = round(oddsratio_to_d(estimate - 1.96 * std.error, log = TRUE), 2))
+# 
+# pre_post_ip_model
+```
+
+```{r model-trial1-trial2}
+# model_training <- tidy_transcripts %>%
+#   select(-carrier, -trial, -Transcription, -Time_Stamp, -Notes, -row) %>%
+#   pivot_wider(names_from = "Section", values_from = "Plural_Error") %>%
+#   mutate(trial1 = factor(trial1, levels = c("no", "yes")),
+#          trial2 = factor(trial2, levels = c("no", "yes")),
+#          Type = factor(Type, levels = c("RP", "IP")),
+#         Condition = factor(Condition,levels=c("Repetition","Reformulation")))
+# 
+# trial1_trial2_ip_model <- glmer(trial2 ~ trial1 * Condition + (1|Subject) ,
+#                            family="binomial", data = model_training %>% 
+#   filter(Type == "IP")) %>%
+#   tidy() %>%
+#   filter(effect == "fixed") %>%
+#   select(-effect, -group) %>%
+#   mutate(p.value = printp(p.value))
+# 
+# trial1_trial2_ip_model
+```
+
+```{r extra-plots}
+# plot_boot_all <- boot_all %>%
+#   mutate(section_numeric = as.numeric(Section))
+# 
+# 
+# plot_labels <- tibble(section_numeric = c(4.5, 4.6),
+#                       empirical_stat = c(.65, .45),
+#                       Condition = c("Reformulation", "Repetition"))
+# 
+# 
+# ggplot(plot_boot_all, aes(x=section_numeric, y=empirical_stat, color=Condition,
+#                      group = Condition)) +
+#   geom_pointrange(aes(ymin = ci_lower, ymax = ci_upper),
+#                   position = position_dodge(.5)) +
+#   geom_line(position = position_dodge(.5)) +
+#   ylab("Proportion of Errors") + 
+#   xlab("") +
+#   scale_x_continuous(limits = c(.75, 5), 
+#                      breaks = 1:4,
+#                      labels = c("pre", "trial1", "trial2", "post")) +
+#   geom_text(aes(label = Condition), data = plot_labels) +
+#   theme(legend.position = "none") +
+#   scale_color_ptol()
+```
+
+
+```{r extra-models, eval = FALSE}
+# looking only at the pre-registered irregular plurals
+# pre_post_ip_model <- glmer(post ~ pre * Condition + (1|Subject) ,
+#         family="binomial", data = model_data %>% filter(Type == "IP")) %>%
+#   tidy() %>%
+#   filter(effect == "fixed") %>%
+#   select(-effect, -group) %>%
+#   mutate(p.value = printp(p.value))
+
+# ignoring which word is wrong, just looking at total errors
+# model_data %>%
+#   group_by(Condition, Type, Subject) %>%
+#   summarise(pre = mean(pre == "yes", na.rm = T), 
+#             post = mean(post == "yes", na.rm = T)) %>%
+#   filter(Type == "IP") %>%
+#   lm(post ~ pre * Condition, data = .) %>%
+#   summary()
+
+#ignoring subject effects
+# pre_post_ip_model <- glm(post ~ pre * Condition,
+#         family="binomial", data = model_data %>% filter(Type == "IP")) %>%
+#   tidy() %>%
+#   mutate(p.value = printp(p.value))
+```

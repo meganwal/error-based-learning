@@ -1,0 +1,575 @@
+---
+title: "Parent reformulations corpus analysis"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 1, digits = 3, dplyr.summarise.inform = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(childesr)
+library(wordbankr)
+library(here)
+library(glue)
+library(lme4)
+library(tidyboot)
+library(ggthemes)
+library(broom)
+library(broom.mixed)
+```
+
+# Sampling from Corpus
+### Defining a set of irregular plurals to search for in CHILDES Database
+```{r define-words}
+
+
+correct_plurals <- tibble(word = c("mouse", "snowman", "man", "woman", "child",
+                                   "foot","tooth","goose", "leaf", "wolf", 
+                                    "wife", "knife", "half", "policeman", "mailman", 
+                                   "newsman", "postman", "fireman", "fisherman"), 
+                          plural = c("mice", "snowmen", "men","women","children",
+                                     "feet","teeth","geese", "leaves", "wolves",
+                                     "wives", "knives", "halves", "policemen", 
+                                     "mailmen", "newsmen", "postmen", "firemen",
+                                     "fishermen")) %>%
+  mutate(plural_type = "correct")
+
+overregularized_plurals <- tibble(word = c("mouse", "mouse", 
+                                           "snowman", "snowman", 
+                                           "man", "man", 
+                                           "woman", "woman",
+                                           "child", "child",
+                                           "foot", "foot",
+                                           "tooth", "tooth",
+                                           "goose", "goose",
+                                           "leaf",
+                                           "wolf", 
+                                           "wife", 
+                                           "knife", 
+                                           "half", 
+                                           "policeman", "policeman",
+                                           "mailman", "mailman",
+                                           "newsman", "newsman",
+                                           "postman", "postman",
+                                           "fireman", "fireman",
+                                           "fisherman", "fisherman"), 
+                          plural = c("mouses", "mices", 
+                                     "snowmans", "snowmens", 
+                                     "mans", "mens",
+                                     "womans", "womens",
+                                     "childs", "childrens",
+                                     "foots", "feets",
+                                     "tooths", "teeths",
+                                     "gooses", "geeses",
+                                     "leafs", 
+                                     "wolfs",
+                                     "wifes",
+                                     "knifes",
+                                     "halfs",
+                                     "policemans", "policemens",
+                                     "mailmans", "mailmens",
+                                     "newsmans", "newsmens",
+                                     "postmans", "postmens",
+                                     "firemans", "firemens",
+                                     "fishermans", "fishermens")) %>%
+  mutate(plural_type = "error")
+
+all_words <- bind_rows(correct_plurals, overregularized_plurals) %>%
+  mutate(plural_id = 1:n())
+```
+
+### Pulling each time a child produces these words, followed by a parent response
+```{r get-contexts, eval = FALSE}
+WINDOW_SIZE <- 2
+
+
+target_contexts <- map_dfr(pull(all_words, plural), 
+                           ~get_contexts(collection = c("Eng-NA", "Eng-UK"),
+                               token = .,
+                               remove_duplicates = FALSE,
+                               window = c(0, WINDOW_SIZE)),
+                           .id = "plural_id") %>%
+  mutate(plural_id = as.numeric(plural_id),
+         context_id = glue("{plural_id}_{context_id}")) %>%
+  left_join(all_words, by = c("plural_id"))
+
+
+keep_contexts <- target_contexts %>%
+  group_by(context_id) %>%
+  filter(first(speaker_role) == "Target_Child") %>%
+  filter(nth(speaker_role, 2) != "Target_Child") 
+```
+
+# Tidying Corpus Data
+
+### Loading CSV of utterances pulled from corpus
+```{r read-contexts}
+keep_contexts <- read_csv(here("Corpus/contexts_2.csv"),
+                          show_col_types = FALSE) 
+```
+
+### Creating a data frame of each word and their possible alternative productions
+(e.g. mouse, mice, mouses, mices)
+```{r check-reformulation}
+word_alternatives <- all_words %>%
+  left_join(select(all_words, -plural_type, -plural_id) %>%
+              rename(alternative = plural), 
+            by = c("word")) %>%
+  filter(alternative != plural) %>%
+  group_by(plural_id, plural_type, word, plural) %>%
+  summarise(alternative = list(alternative)) %>%
+  ungroup()
+```
+
+### Annotating whether a given utterance replayed or reformulated the plural used in the previous utterance
+```{r check-repetition}
+annotated_contexts <- keep_contexts %>%
+  left_join(select(word_alternatives, plural, alternative),
+            by = "plural") %>%
+  group_by(context_id) %>%
+  mutate(gloss_list = str_split(gloss, " ")) %>%
+  rowwise() %>%
+  mutate(replay = sum(plural == gloss_list) > 0) %>%
+  mutate(reformulation = list(map(alternative,
+                                        ~Filter(function(x) length(x) > 0, 
+                                                str_subset(gloss_list, .x))))) %>%
+  mutate(reformulation = paste0(c(unlist(reformulation), ""),
+                                      collapse = "")) %>%
+  mutate(reformulation = if_else(reformulation =="", NA_character_, 
+                                       reformulation)) %>%
+  mutate(reformulation = if_else(replay == TRUE, NA_character_, 
+                                       reformulation)) %>%
+  ungroup()
+
+```
+
+# Dividing Data into 1st, 2nd, and 3rd utterances
+
+### Counting the number of errors in initial utterances
+```{r count overregs}
+#pulling initial utterances from data frame
+initial_utts <- annotated_contexts %>%
+  group_by(context_id) %>%
+  slice(1) 
+
+#separating error utterances
+incorrect_utts <- initial_utts %>%
+  filter(plural_type == "error")
+
+#number of utterances and children in overall sample
+n_children_all <- length(unique(initial_utts$target_child_id))
+n_utts_all <- nrow(initial_utts)
+
+#calculating age data for entire sample
+age_calculations <-  keep_contexts %>%
+  group_by(transcript_id, target_child_id)  %>%
+  summarise(Age = mean(target_child_age)) %>%
+  drop_na()
+
+mean_age <- mean(age_calculations$Age)
+stv_age <- sd(age_calculations$Age)
+range_age <- range(age_calculations$Age)
+range_min <- range_age[1]
+range_max <- range_age[2]
+
+#overall overregularization error rate
+prop_errors <- nrow(incorrect_utts)/nrow(initial_utts)*100
+
+#calculating the percentage of errors that occur in children under 5
+incorrect_below_5 <- incorrect_utts %>%
+  filter(target_child_age/12 < 5)
+prop_under_5 <- (nrow(incorrect_below_5)/nrow(incorrect_utts))*100
+
+#number of utterances for children 4 and below
+initial_utts_4 <- initial_utts %>%
+  mutate(age_raw = target_child_age/12, age_years = floor(age_raw)) %>%
+  filter(age_years < 5)
+```
+
+Total sample of `r n_utts_all` utterances across `r n_children_all` children (age range: `r range_min` to `r range_max` months; mean age across utterances = `r mean_age` months; SD = `r stv_age` months).
+
+In this sample, children made overregularization errors `r prop_errors`% of the time. 
+
+`r prop_under_5`% of the errors were made by children up to and including 4 years of age. 
+
+### Selecting parent responses to initial utterances from sample
+```{r pull parent responses}
+parent_responses <- annotated_contexts %>%
+  group_by(context_id) %>%
+  slice(2) %>%
+  filter(speaker_role %in% c("Mother", "Father", "Adult", 
+                             "Grandmother", "Grandfather"))
+```
+
+### Organizing response counts by age
+```{r parent-responses-by-age}
+responses_by_age <- parent_responses %>%
+  mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE), other.true = ifelse(reform.true | replay, FALSE, TRUE)) %>%
+  mutate(age_years = factor(floor(target_child_age/12), levels = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9","10"))) %>%
+  filter(!is.na(gloss), !is.na(age_years), plural_type == "error") %>%
+  group_by(plural_type, age_years) %>%
+  summarise(replay = sum(replay, na.rm=TRUE), reformulation = 
+               sum(reform.true, na.rm=TRUE), other = sum(other.true, na.rm =TRUE)) %>%
+  ungroup() %>%
+  complete(plural_type, age_years, fill=list(n.children = 0, n.utterances = 0, replay = 0, reformulation = 0, other = 0))
+
+all_utts_by_age <- parent_responses %>%
+  mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE), other.true = ifelse(reform.true | replay, FALSE, TRUE)) %>%
+  mutate(age_years = factor(floor(target_child_age/12), levels = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9","10"))) %>%
+  filter(!is.na(gloss), !is.na(age_years)) %>%
+  group_by(age_years) %>%
+  summarise(n.children = n_distinct(target_child_id), n.utts = n())
+
+incorrect_by_age <- left_join(all_utts_by_age, responses_by_age) %>%
+  select(-plural_type)
+
+incorrect_by_age
+```
+
+### Selecting child responses to parent responses
+```{r child-responses}
+child_responses <- annotated_contexts %>%
+  group_by(context_id) %>%
+  mutate(reformulation = lag(reformulation),
+         parent_replay = lag(replay)) %>%
+  slice(3) %>%
+  mutate(repeated_plural = str_detect(gloss, plural),
+         repeated_reformulation = str_detect(gloss, reformulation)) %>%
+  rowwise() %>%
+  mutate(form_change = sum(map_lgl(alternative, ~ .x %in% gloss_list)) > 0)
+```
+
+# Analyses with children up to and including 4 years of age (reported in manuscript):
+
+```{r}
+up_to_four <- parent_responses %>%
+  mutate(age_raw = target_child_age/12, age_years = floor(age_raw)) %>%
+  filter(age_years < 5, !is.na(gloss)) %>%
+  mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE))
+
+proportion_of_sample <- nrow(up_to_four)/nrow(parent_responses)
+
+#number of utterances and children in lower age range sample
+n_child <- length(unique(up_to_four$target_child_id))
+n_utterances_four <- nrow(up_to_four)
+```
+
+When only including children up to and including 4 years of age, there are `r n_utterances_four` utterances across `r n_child` children.
+
+### T-tests comparing responses rates for both correct and incorrect utterances
+```{r}
+up_to_four_error <- up_to_four %>% filter(plural_type == "error")
+up_to_four_corr <- up_to_four %>% filter(plural_type == "correct")
+
+t.test(up_to_four_corr$replay, up_to_four_error$replay, var.equal = FALSE)
+
+t.test(up_to_four_corr$reform.true, up_to_four_error$reform.true, var.equal = FALSE)
+```
+
+### Breakdown of parent responses after correct and incorrect utterances (4 and under):
+```{r parent-responses}
+parent_responses_under_four <- up_to_four %>%
+  mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE), 
+         other.true = ifelse(reform.true | replay, FALSE, TRUE)) %>%
+  group_by(plural_type) %>%
+  summarise(n.children = length(unique(target_child_id)), n.utterances = n(), 
+            replay = sum(replay, na.rm=TRUE), 
+            reformulation = sum(reform.true, na.rm=TRUE),
+            other = sum(other.true, na.rm=TRUE))
+
+parent_responses_under_four
+
+parent_error <- parent_responses_under_four %>% filter(plural_type == "error")
+overall_reform_rate <- (parent_error$reformulation/parent_error$n.utterances)*100
+```
+
+Overall, parents reformulated children's overregularization errors `r overall_reform_rate`% of the time.  
+
+### Bootstrapped mean rates of responses across individual children
+```{r bootstrap - parents - four and under}
+boot_responses_under_four <- up_to_four %>%
+  group_by(plural_type, target_child_id) %>%
+  summarise(replay = mean(replay == TRUE), 
+            reformulation = mean(!is.na(reformulation))) %>%
+  pivot_longer(cols = replay:reformulation,  names_to = "response_type",
+               values_to = "rate") %>%
+  ungroup() %>%
+  group_by(plural_type, response_type) %>%
+  tidyboot_mean(rate, na.rm = TRUE) 
+```
+
+```{r plot parent reformulation and repetition rates - four and under}
+ggplot(boot_responses_under_four, aes(x = plural_type, y = empirical_stat, 
+                           fill = response_type)) +
+  geom_col(position = position_dodge(.5),
+           width = .5) +
+  geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
+                 position=position_dodge(.5)) +
+  labs(x = "Child Correctness", y= "Mean proportion of adult responses", 
+        title = ) +
+  theme_few() +
+  theme(legend.position = c(.8,.9), legend.title = element_blank(), 
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 15),
+        axis.title = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  xlab("") +
+  guides(fill = guide_legend(title = "Response Type")) +
+  scale_fill_manual(values = c("#D66252", "#87BFBF"))
+```
+
+### Information Gain Analyses:
+```{r information-gain}
+correct_dis <- up_to_four %>%
+  ungroup() %>%
+  summarise(correct = mean(plural_type == "correct"), 
+            error = mean(plural_type == "error"),
+            total = n())
+
+replay_dis <- up_to_four %>%
+  group_by(replay) %>%
+  summarise(correct = mean(plural_type == "correct"), 
+            error = mean(plural_type == "error"),
+            total = n())
+
+reform_dis <- up_to_four %>%
+  mutate(reform = if_else(!is.na(reformulation), TRUE, FALSE)) %>%
+  group_by(reform) %>%
+  summarise(correct = mean(plural_type == "correct"), 
+            error = mean(plural_type == "error"),
+            total = n())
+
+replay_dis_true <- replay_dis %>%
+  filter(replay == TRUE)
+
+replay_dis_false <- replay_dis %>%
+  filter(replay == FALSE)
+
+reform_dis_true <- reform_dis %>%
+  filter(reform == TRUE)
+
+reform_dis_false <- reform_dis %>%
+  filter(reform == FALSE)
+
+entropy <- function (class0, class1) {
+  return( -(class0 * log2(class0) + class1 * log2(class1)))
+}
+  
+s_entropy <- entropy(correct_dis$correct, correct_dis$error)
+s1_entropy <- entropy(replay_dis_true$correct, replay_dis_true$error)
+s2_entropy <- entropy(replay_dis_false$correct, replay_dis_false$error)
+
+sa_entropy <- (replay_dis_true$total/correct_dis$total * s1_entropy +
+                       replay_dis_false$total/correct_dis$total * s2_entropy)
+
+replay_gain <- s_entropy - sa_entropy
+
+s1_reform_entropy <- entropy(reform_dis_true$correct, reform_dis_true$error)
+s2_reform_entropy <- entropy(reform_dis_false$correct, reform_dis_false$error)
+
+sa_reform_entropy <- (reform_dis_true$total/correct_dis$total * s1_reform_entropy + 
+                              reform_dis_false$total/correct_dis$total * s2_reform_entropy)
+
+reform_gain <- s_entropy - sa_reform_entropy
+```
+
+Overall entropy of the sample was `r s_entropy`. Entropy(Accuracy, Reformulation) was `r sa_reform_entropy`
+
+IG(Accuracy, Replay) and IG(A, Reformulation) was `r replay_gain` and `r reform_gain` bits respectively. 
+
+### Breakdown by word (4 and under)
+```{r word-breakdown-under-four}
+by_word_four <- up_to_four %>%
+  mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE), 
+         other.true = ifelse(reform.true | replay, FALSE, TRUE)) %>%
+  filter(!is.na(gloss)) %>%
+  group_by(plural_type, word, .drop = FALSE) %>%
+  summarise(n.children = length(unique(target_child_id)), n.utterances = n(), 
+            replay = sum(replay, na.rm=TRUE), 
+            reformulation = sum(reform.true, na.rm=TRUE),
+            other = sum(other.true, na.rm=TRUE)) %>%
+  ungroup() %>%
+  complete(plural_type, word, fill=list(n.children = 0, n.utterances = 0, replay = 0, reformulation = 0, other = 0))
+
+by_word_four
+```
+
+### Child responses to reformulation table
+```{r}
+child_up_to_four <- child_responses %>%
+  mutate(age_raw = target_child_age/12, age_years = floor(age_raw)) %>%
+  filter(age_years < 5, !is.na(gloss)) %>%
+  mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE))
+
+child_reform_four <- child_up_to_four %>%
+  filter(!is.na(reformulation), speaker_role == "Target_Child", plural_type == "error") %>%
+  group_by(plural_type) %>%
+  summarise(repeated_error = (sum(repeated_plural, na.rm=TRUE)), 
+            repeated_reform = sum(repeated_reformulation, na.rm=TRUE))
+
+child_reform_four
+```
+
+### Calculating bootstrapped child uptake of reformulations and repetitions
+```{r booted-child-responses} 
+booted_repeated_reformulations <- child_up_to_four %>%
+  filter(!is.na(reformulation), speaker_role == "Target_Child") %>%
+  pivot_longer(c(repeated_plural, repeated_reformulation), 
+               names_to = "response_type",
+               values_to = "rate") %>%
+  group_by(plural_type, response_type, target_child_id) %>%
+  summarise(rate = mean(rate)) %>%
+  tidyboot_mean(rate) %>%
+  mutate(response_type = factor(response_type, 
+                                levels=c("repeated_reformulation", 
+                                         "repeated_plural"), 
+                          labels = c("take up reformulation", "repeat error")))
+
+booted_replay_replies <- child_up_to_four %>%
+  filter(parent_replay == TRUE, speaker_role == "Target_Child") %>%
+  pivot_longer(c(repeated_plural, form_change), 
+               names_to = "response_type",
+               values_to = "rate") %>%
+  group_by(plural_type, response_type, target_child_id) %>%
+  summarise(rate = mean(rate)) %>%
+  tidyboot_mean(rate, na.rm = TRUE) %>%
+  mutate(response_type = factor(response_type, 
+                                levels=c("form_change", "repeated_plural"), 
+                          labels = c("Change to New Form", "Use Original Form")))
+```
+
+```{r  child response to reformulation plot}
+ggplot(booted_repeated_reformulations, aes(x=response_type, y=empirical_stat, fill= plural_type)) +
+  geom_col(position = position_dodge(.5),
+           width = .5) +
+  geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
+                 position=position_dodge(.5)) +
+  labs(y= "Response to reformulation (prop). ", title = "Production after reformulation") +
+  theme_few(base_size = 10) +
+  theme(legend.position = c(.2,.8)) +
+  xlab("") +
+  scale_fill_ptol() +
+  guides(fill = guide_legend(title = "Original Utterance"))
+```
+
+```{r child response to repetition plot}
+ggplot(booted_replay_replies, aes(x=response_type, y=empirical_stat, 
+                       fill= plural_type)) +
+  geom_col(position = position_dodge(.5),
+           width = .5) +
+  geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
+                 position=position_dodge(.5)) +
+  labs(y= "Response to repetition (prop). ", title = "Production after repetition") +
+  theme_few(base_size = 10) +
+  theme(legend.position = c(.2,.8)) +
+  xlab("") +
+  scale_fill_ptol() +
+  guides(fill = guide_legend(title = "Original Utterance"))
+```
+
+Dividing words based on plural or singular frequency
+```{r}
+frequencies <- read_csv(here("Corpus/Frequencies.csv")) %>%
+  mutate(Difference = `Singular Frequency` - `Plural Frequency`) %>%
+  mutate(More_Common = ifelse(Difference < 0, "plural", "singular"))
+
+freq_word <- left_join(by_word_four, frequencies, by = c("word" = "Word"))
+
+plural_common <- freq_word %>% filter(More_Common == "plural")
+```
+
+
+# Analyses for children of all ages:
+
+### Calculating the average reformulation and replay rates dependent on whether or not the child used a correct or incorrect plural form. 
+```{r bootstrap - parents}
+boot_responses <- parent_responses %>%
+  group_by(target_child_id, plural_type) %>%
+  summarise(replay = mean(replay == TRUE), 
+            reformulation = mean(!is.na(reformulation))) %>%
+  pivot_longer(cols = replay:reformulation,  names_to = "response_type",
+               values_to = "rate") %>%
+  ungroup() %>%
+  group_by(plural_type, response_type) %>%
+  tidyboot_mean(rate, na.rm = TRUE)
+```
+
+```{r plot parent reformulation and repetition rates}
+ggplot(boot_responses, aes(x = plural_type, y = empirical_stat, 
+                           fill = response_type)) +
+  geom_col(position = position_dodge(.5),
+           width = .5) +
+  geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
+                 position=position_dodge(.5)) +
+  ylab("Proportion of Responses") +
+  theme_few() +
+  theme(legend.position = "top") +
+  xlab("") +
+  guides(fill = guide_legend(title = "Response Type"))
+```
+
+### Following table organizes response counts by word
+```{r parent-responses-by-word}
+responses_by_word <- parent_responses %>%
+  mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE), 
+         other.true = ifelse(reform.true | replay, FALSE, TRUE)) %>%
+  group_by(plural_type, word) %>%
+  summarise(n.children = length(unique(target_child_id)), n.utterances = n(), 
+            replay = sum(replay, na.rm=TRUE), 
+            reformulation = sum(reform.true, na.rm=TRUE),
+            other = sum(other.true, na.rm=TRUE))
+```
+
+
+### Dataframe of child responses to parent reformulations
+
+### First organized by word:
+```{r child-responses-to-reforms-per-word}
+child_reform_word <- child_responses %>%
+  filter(!is.na(reformulation), speaker_role == "Target_Child", plural_type == "error") %>%
+  group_by(plural_type, word) %>%
+  summarise(n.utterances = n(), repeated_error = (sum(repeated_plural, na.rm=TRUE)), 
+            repeated_reform = sum(repeated_reformulation, na.rm=TRUE))
+```
+
+```{r child-responses-to-replays-per-word}
+child_replays_word <- child_responses %>%
+  filter(parent_replay == TRUE, speaker_role == "Target_Child") %>%
+  group_by(plural_type, word) %>%
+  summarise(n.utterances = n(), repeated_plural = sum(repeated_plural, na.rm=TRUE), 
+            form_change = sum(form_change, na.rm=TRUE))
+```
+
+### Then organized by age:
+```{r child-responses-by-age}
+child_reform_age <- child_responses %>%
+  filter(!is.na(reformulation), speaker_role == "Target_Child") %>%
+  mutate(age_years = factor(floor(target_child_age/12), levels = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9","10")), other.true = ifelse(repeated_plural | repeated_reformulation, FALSE, TRUE)) %>%
+  filter(!is.na(gloss)) %>%
+  group_by(plural_type, age_years) %>%
+  summarise(n.children = length(unique(target_child_id)), n.utterances = n(), 
+            repeated_error = (sum(repeated_plural, na.rm=TRUE)), 
+            repeated_reform = (sum(repeated_reformulation, na.rm=TRUE)), 
+            other = (sum(other.true, na.rm=TRUE))) %>%
+  ungroup() %>%
+  complete(plural_type, age_years, fill=list(n.children = 0, n.utterances = 0, repeated_reform = 0, repeated_error = 0, other = 0))
+
+child_replay_age <- child_responses %>%
+  filter(parent_replay == TRUE, speaker_role == "Target_Child") %>%
+  mutate(age_years = factor(floor(target_child_age/12), levels = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9","10")), other.true = ifelse(repeated_plural | form_change, FALSE, TRUE)) %>%
+  filter(!is.na(gloss)) %>%
+  group_by(plural_type, age_years) %>%
+  summarise(n.children = length(unique(target_child_id)), n.utterances = n(), 
+            repeated_plural = sum(repeated_plural, na.rm=TRUE), 
+            form_change = sum(form_change, na.rm=TRUE),
+            other = sum(other.true, na.rm=TRUE)) %>%
+  ungroup() %>%
+  complete(plural_type, age_years, fill=list(n.children = 0, n.utterances = 0, repeated_plural = 0, form_change = 0, other = 0))
+```
+
+
