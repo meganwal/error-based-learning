@@ -6,36 +6,59 @@ date: "2023-10-06"
 
 ```{r load-libraries, message = FALSE, warning = FALSE}
 library(tidyverse)
-library(readxl)
 library(here)
 library(tidyboot)
-library(ggthemes)
-library(irr)
 library(lme4)
-library(broom)
-library(broom.mixed)
-library(effectsize)
-library(knitr)
-library(papaja)
-library(cowplot)
+library(ggthemes)
 ```
 
-# Data Analysis
+### Load File
 
 ```{r}
-tidy_final <- read.csv(here("Experiment2/exp2_clean.csv"))
+tidy_final_2 <- read.csv(here("Experiment2/exp2_clean_final.csv"))
+```
+
+### Calculating Lexical Error Rate Exclusion
+```{r}
+error_rates_2 <- tidy_final_2 %>%
+  group_by(Subject) %>%
+  summarise(Lex_Error = mean(Lex_Error == "yes")) %>%
+  arrange(desc(Lex_Error))
+
+tidy_final_sample_2 <- tidy_final_2 %>%
+  filter(Subject != 23)
+
+age_test_2 <- tidy_final_sample_2 %>%
+  group_by(Subject) %>%
+  summarise(age = mean(Age_Y)) %>%
+  arrange(desc(Subject)) %>%
+  ungroup() %>%
+  summarise(m_age = mean(age), sd_age = sd(age))
+```
+
+# Analyses with final sample
+(excluding subject with 20% lex error rates)
+
+```{r}
+trial_data_2 <- tidy_final_sample_2 %>%
+  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), 
+                          labels = c("pre", "block1","block2", "post")),
+         Condition = factor(Condition, levels = c("Reformulation", "Repetition")),
+         Plural_Error = factor(Plural_Error, levels = c("no", "yes")),
+         Type = as.factor(Type),
+         Lex_Error = as.factor(Lex_Error)) %>%
+  filter(!is.na(Plural_Error)) %>%
+  filter(Lex_Error == "no") %>%
+  filter(Type == "IP") %>%
+  droplevels()
 ```
 
 ### Bootstrap mean error rates for each trial type across conditions
 ```{r bootstrap}
-boot_all_referent <- tidy_final %>%
-  filter(Plural_Error != "NA") %>%
-  filter(Type == "IP") %>%
-  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), labels = c("pre", "block1","block2", "post")))%>%
-  group_by(Condition, Section, Type, Subject) %>%
-  filter(Lex_Error == "no") %>%
+boot_all_referent <- trial_data_2 %>%
+  group_by(Condition, Section, Subject) %>%
   summarise(Plural_Error= mean(Plural_Error=="yes")) %>%
-  tidyboot_mean(Plural_Error) %>%
+  tidyboot_mean(Plural_Error, na.rm = TRUE) %>%
   filter(Condition != "NA") %>%
   filter(Section != "NA")
 ```
@@ -46,17 +69,74 @@ ggplot(boot_all_referent, aes(x=Section, y=empirical_stat, fill=Condition)) +
            width = .5) +
   geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
                  position=position_dodge(.5)) +
-  ylab("Proportion of Errors") +
+  ylab("Overregularization Errors (prop.)") +
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
         panel.background = element_blank(), axis.line = element_line(colour = "black"),
         legend.position = "top") + 
   xlab("") +
   scale_fill_manual(values = c("#D66252", "#87BFBF"))
 ```
-
-
+### Interaction Model
 ```{r}
-ref_word_analyses <- tidy_final %>%
+pre_post_2 <- trial_data_2 %>%
+  filter(Section %in% c("pre", "post")) %>%
+  mutate(Section = factor(Section, levels = c("pre","post"))) %>%
+  droplevels()
+
+overall_model_2 <- pre_post_2 %>%
+  glmer(Plural_Error ~ Section * Condition 
+                       + (1 | Subject) + (1 + Condition | Target),
+                       family = "binomial", data = .) 
+summary(overall_model_2)
+```
+
+## Comparing Pretest error rates
+```{r pre-models}
+contrasts(trial_data_2$Condition) <- c(-0.5,0.5)
+
+compare_pre_2 <- glmer(Plural_Error ~ Condition + (1 | Subject) + (1|Target),  
+                             family = "binomial", 
+                             data = trial_data_2 %>% 
+                               filter(Section == "pre")) 
+
+summary(compare_pre_2)
+```
+
+## Modelling reformulation performance on all trials to pretest
+```{r reform-all-trials}
+reformulation_model_2 <- glmer(Plural_Error ~ Section + (1 | Subject) + (1| Target),  
+                             family = "binomial", 
+                             data = trial_data_2 %>% 
+                               filter(Condition == "Reformulation")) 
+
+summary(reformulation_model_2)
+```
+## Modelling repetition performance on all trials to pretest
+```{r repetition-all-trials}
+repetition_model_2 <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|Target), 
+                             family = "binomial", 
+                             data = trial_data_2 %>% 
+                               filter(Condition == "Repetition"))
+
+summary(repetition_model_2)
+```
+
+### Model predicting performance by condition and pretest performance
+```{r overall model}
+pre_post_matched_2 <- pre_post_2 %>%
+  select(Subject, Condition, Section, Type, Plural_Error, Target) %>%
+  group_by(Subject, Target) %>%
+  pivot_wider(names_from = Section, values_from = Plural_Error)
+
+pre_to_post_2 <- glmer(post ~ pre + Condition + (Condition|Subject) + (1|Target),
+                     family = "binomial", data = pre_post_matched_2)
+
+pre_to_post_2 %>% summary()
+```
+
+### Change in error from pre to post by word
+```{r}
+ref_word_analyses <- tidy_final_2 %>%
   filter(Plural_Error != "NA") %>%
   filter(Type == "IP") %>%
   mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), labels = c("pre", "block1","block2", "post"))) %>%
@@ -70,200 +150,9 @@ ref_word_analyses <- tidy_final %>%
   mutate(Change = post - pre)
 ```
 
-### Modeling performance on training and post-test from pretest performance for each
-condition
-
-```{r condition models}
-trial_data <- tidy_final %>%
-  filter(Plural_Error != "NA") %>%
-  filter(Type == "IP") %>%
-  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), 
-                          labels = c("pre", "block1","block2", "post")),
-         Condition = factor(Condition, levels = c("Repetition", "Reformulation")),
-         Plural_Error = factor(Plural_Error, levels = c("no", "yes"))) %>%
-  group_by(Condition, Section, Type, Subject) %>%
-  filter(Lex_Error == "no")
-
-contrasts(trial_data$Condition) <- c(-0.5,0.5)
-
-compare_pre <- glmer(Plural_Error ~ Condition + (1 | Subject) + (1|Target),  
-                             family = "binomial", 
-                             data = trial_data %>% 
-                               filter(Section == "pre")) %>%
-  tidy() %>%
-  filter(effect == "fixed") %>%
-  select(-effect,-group) %>%
-  mutate(p.value = papaja::printp(p.value))
-
-compare_pre
-
-reformulation_model <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|Target),  
-                             family = "binomial", 
-                             data = trial_data %>% 
-                               filter(Condition == "Reformulation")) %>%
-  tidy() %>%
-  filter(effect == "fixed") %>%
-  select(-effect,-group) %>%
-  mutate(p.value = papaja::printp(p.value))
-
-reformulation_model
-
-repetition_model <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|Target), 
-                             family = "binomial", 
-                             data = trial_data %>% 
-                               filter(Condition == "Repetition")) %>%
-  tidy() %>%
-  filter(effect == "fixed") %>%
-  select(-effect,-group) %>%
-  mutate(p.value = papaja::printp(p.value))
-
-repetition_model
-
-both_model <- glmer(Plural_Error ~ Section * Condition + (1 | Subject) + (1|Target), 
-                             family = "binomial", 
-                             data = trial_data) %>%
-  tidy() %>%
-  filter(effect == "fixed") %>%
-  select(-effect,-group) %>%
-  mutate(p.value = papaja::printp(p.value))
-
-both_model
-```
-
-Model predicting performance by condition and phase of experiment
-```{r overall model}
-pre_post <- trial_data %>%
-  filter(Section %in% c("pre", "post")) %>%
-  mutate(Section = factor(Section, levels = c("pre","post")))
-
-
-pre_post_matched <- pre_post %>%
-  select(Subject, Condition, Section, Type, Plural_Error, Target) %>%
-  group_by(Subject, Target) %>%
-  pivot_wider(names_from = Section, values_from = Plural_Error)
-
-pre_to_post <- glmer(post ~ pre + Condition + (Condition|Subject) + (1|Target),
-                     family = "binomial", data = pre_post_matched)
-
-pre_to_post %>% summary()
-```
-
-```{r}
-boot_all_matched <- pre_post_matched %>%
-  group_by(Condition, Subject) %>%
-  filter(!is.na(post) & !is.na(pre)) %>%
-  summarise(change = (mean(post=="yes") - mean(pre == "yes"))) %>%
-  tidyboot_mean(change)
-```
-
-```{r}
-ggplot(boot_all_matched, aes(x=Condition, y=empirical_stat, fill= Condition)) +
-  geom_col(position = position_dodge(.5),
-           width = .5) +
-  geom_linerange(aes(ymin=ci_lower, ymax=ci_upper)) +
-  ylab("Change in Error Rate from Pre to Post Test") +
-  scale_x_discrete(position = "top") +
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-        panel.background = element_blank(), axis.line = element_line(colour = "black"),
-        legend.position = "top") + 
-  xlab("") +
-  scale_fill_manual(values = c("#D66252", "#87BFBF"))
-```
-
-
-Interaction Model
-```{r}
-overall_model <- pre_post %>%
-  glmer(Plural_Error ~ Section * Condition 
-                       + (1 | Subject) + (1 | Target),
-                       family = "binomial", data = .) %>%
-  tidy() %>%
-  filter(effect == "fixed") %>%
-  select(-effect, -group) %>%
-  mutate(p.value = printp(p.value),
-         d = round(oddsratio_to_d(estimate, log = TRUE), 2),
-         d_high = round(oddsratio_to_d(estimate + 1.96 * std.error, log = TRUE), 2),
-         d_low = round(oddsratio_to_d(estimate - 1.96 * std.error, log = TRUE), 2))
-
-overall_model
-```
-
-# Exploratory analyses
-
-### Plotting relationship between the amount that children reduced overregularization
-in the two within-subjects conditions
-```{r study3_cor}
-subject_conditon_effects <- tidy_final %>%
-  mutate(Plural_Error = Plural_Error == "yes") %>%
-  filter(Section %in% c("pre", "post"), Lex_Error == "no", !is.na(Condition)) %>%
-  group_by(Condition, Section, Subject) %>%
-  summarise(Plural_Error = mean(Plural_Error)) %>%
-  pivot_wider(names_from = "Section", values_from = "Plural_Error") %>%
-  mutate(diff = pre - post) %>%
-  select(-post, -pre) %>%
-  pivot_wider(names_from = "Condition", values_from = "diff")
-
-
-study3_cor_test <- cor.test(pull(subject_conditon_effects, Reformulation),
-         pull(subject_conditon_effects, Repetition))
-```
-
-```{r study3-cor-plot}
-pre_corrs <- tidy_final %>%
-  mutate(Plural_Error = Plural_Error == "yes") %>%
-  filter(Section == "pre", Lex_Error == "no",
-         !is.na(Condition), Type == "IP") %>%
-  select(Subject, Condition, Target, Plural_Error) %>%
-  group_by(Subject, Condition) %>%
-  summarise(err = sum(Plural_Error)) %>%
-  pivot_wider(names_from = "Condition", values_from = "err") %>%
-  drop_na()
-
-pre_corrs_plot <- pre_corrs %>%
-  ggplot(aes(x = Reformulation, y = Repetition)) +
-  geom_jitter(width = .1, height = .1) +
-  geom_smooth(method = "lm", color = ptol_pal()(1),
-              fill = ptol_pal()(1)) +
-  labs(y = "Errors on Reformulation targets",
-       x = "Errors on Repetition targets",
-       title = "Relationship between error rates at Pretest") +
-  theme_few(base_size = 10)
-
-
-delta_corrs <- tidy_final %>%
-  mutate(Plural_Error = Plural_Error == "yes") %>%
-  filter(Section %in% c("pre", "post"), Lex_Error == "no",
-         !is.na(Condition), Type == "IP") %>%
-  select(Subject, Condition, Section, Target, Plural_Error) %>%
-  pivot_wider(names_from = Section, values_from = Plural_Error) %>%
-  drop_na() %>%
-  mutate(diff = pre - post) %>%
-  select(-post, -pre) %>%
-  group_by(Subject, Condition) %>%
-  summarise(diff = sum(diff)) %>%
-  pivot_wider(names_from = "Condition", values_from = "diff") %>%
-  select(Subject, Reformulation, Repetition) %>%
-  drop_na()
-
-delta_corrs_plot <- delta_corrs %>%
-  ggplot(aes(x = Reformulation, y = Repetition)) +
-  geom_jitter(width = .1, height = .1) +
-  geom_smooth(method = "lm", color = ptol_pal()(1),
-              fill = ptol_pal()(1)) +
-  labs(y = "Reformulation improvement",
-       x = "Repetition improvement",
-       title = "Relationship between change in erorr rate between Pre and Post test") +
-  theme_few(base_size = 10)
-
-plot_grid(pre_corrs_plot, delta_corrs_plot, labels=c("A", "B"))
-```
-
-Comparing performance across counterbalanced groups
+### Comparing performance across counterbalanced groups
 ```{r order comparisons}
-boot_all_referent_group <- tidy_final %>%
-  filter(Plural_Error != "NA") %>%
-  filter(Type == "IP") %>%
-  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), labels = c("pre", "block1","block2", "post")))%>%
+boot_all_referent_group <- trial_data_2 %>%
   group_by(Condition, Group, Section, Type, Subject) %>%
   filter(Lex_Error == "no") %>%
   summarise(Plural_Error= mean(Plural_Error=="yes")) %>%
