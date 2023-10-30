@@ -18,6 +18,17 @@ library(ggthemes)
 tidy_final_2 <- read.csv(here("Experiment2/exp2_clean_final.csv"))
 ```
 
+## Age calculations before exclusion
+```{r age-full}
+age_stats_all_2 <- tidy_final_2 %>%
+  group_by(Subject) %>%
+  summarise(age = mean(Age_Y)) %>%
+  ungroup() %>%
+  summarise(m_age = mean(age), sd_age = sd(age), range =range(age))
+
+age_stats_all_2
+```
+
 ### Calculating Lexical Error Rate Exclusion
 ```{r}
 error_rates_2 <- tidy_final_2 %>%
@@ -33,7 +44,9 @@ age_test_2 <- tidy_final_sample_2 %>%
   summarise(age = mean(Age_Y)) %>%
   arrange(desc(Subject)) %>%
   ungroup() %>%
-  summarise(m_age = mean(age), sd_age = sd(age))
+  summarise(m_age = mean(age), sd_age = sd(age), range = range(age))
+
+age_test_2
 ```
 
 # Analyses with final sample
@@ -61,6 +74,8 @@ boot_all_referent <- trial_data_2 %>%
   tidyboot_mean(Plural_Error, na.rm = TRUE) %>%
   filter(Condition != "NA") %>%
   filter(Section != "NA")
+
+boot_all_referent
 ```
 
 ```{r plot}
@@ -69,13 +84,19 @@ ggplot(boot_all_referent, aes(x=Section, y=empirical_stat, fill=Condition)) +
            width = .5) +
   geom_linerange(aes(ymin=ci_lower, ymax=ci_upper), 
                  position=position_dodge(.5)) +
-  ylab("Overregularization Errors (prop.)") +
+  ylab("Pluralization Errors (prop.)") +
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
         panel.background = element_blank(), axis.line = element_line(colour = "black"),
         legend.position = "top") + 
   xlab("") +
-  scale_fill_manual(values = c("#D66252", "#87BFBF"))
+  scale_fill_manual(values = c("#D66252", "#87BFBF")) +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14),
+        legend.text = element_text(size=12),
+        legend.title = element_text(size=14),
+        plot.title = element_text(size=16))
 ```
+
 ### Interaction Model
 ```{r}
 pre_post_2 <- trial_data_2 %>%

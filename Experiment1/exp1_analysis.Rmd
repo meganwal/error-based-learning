@@ -16,6 +16,30 @@ library(ggthemes)
 tidy_final <- as_tibble(read.csv(here("Experiment1/exp1_clean_final.csv")))
 ```
 
+## Age calculations before exclusion
+```{r age-full}
+age_stats_all <- tidy_final %>%
+  group_by(Subject) %>%
+  summarise(age = mean(Age)) %>%
+  ungroup() %>%
+  summarise(m_age = mean(age), sd_age = sd(age), range =range(age))
+
+age_stats_all
+
+age_test_all <- tidy_final %>%
+  group_by(Subject, Condition) %>%
+  summarise(age = mean(Age)) 
+reform_all <- age_test_all %>% 
+  filter(Condition == "Reformulation") %>% 
+  pull(age)
+repetition_all <- age_test_all %>% 
+  filter(Condition == "Repetition") %>% 
+  pull(age)
+
+t.test(reform_all,repetition_all)
+```
+
+
 ### Calculating Lexical Error Rate Exclusion
 ```{r error-rates}
 error_rates <- tidy_final %>%
@@ -32,7 +56,9 @@ age_stats <- tidy_final_sample %>%
   group_by(Subject) %>%
   summarise(age = mean(Age)) %>%
   ungroup() %>%
-  summarise(m_age = mean(age), sd_age = sd(age))
+  summarise(m_age = mean(age), sd_age = sd(age), range =range(age))
+
+age_stats
 
 age_test <- tidy_final_sample %>%
   group_by(Subject, Condition) %>%
@@ -71,6 +97,8 @@ boot_all <- trial_data %>%
   group_by(Condition, Section, Subject) %>%
   summarise(Plural_Error= mean(Plural_Error == "yes")) %>%
   tidyboot_mean(Plural_Error)
+
+boot_all
 ```
 
 ```{r plot-condition}
@@ -79,12 +107,17 @@ ggplot(boot_all, aes(x=Section, y=empirical_stat, fill=Condition)) +
            width = .5) +
   geom_linerange(aes(ymin=ci_lower, ymax=ci_upper),
                  position=position_dodge(.5)) +
-  ylab("Overregularization Errors   (prop.)") +
+  ylab("Pluralization Errors (prop.)") +
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
         panel.background = element_blank(), axis.line = element_line(colour = "black"),
         legend.position = "top") +
   xlab("") +
-  scale_fill_manual(values = c("#D66252", "#87BFBF"))
+  scale_fill_manual(values = c("#D66252", "#87BFBF")) +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14),
+        legend.text = element_text(size=12),
+        legend.title = element_text(size=14),
+        plot.title = element_text(size=16))
 ```
 
 ### Interaction Model
@@ -145,82 +178,4 @@ pre_to_post <- glmer(post ~ pre + Condition + (1|Subject) + (1 + Condition|targe
                      family = "binomial", data = pre_post_matched)
 
 summary(pre_to_post)
-```
-
-### Change in error from pre to post by word
-```{r by_word analyses}
-word_analyses <- tidy_final_sample %>%
-  filter(Plural_Error != "NA") %>%
-  filter(Type == "IP") %>%
-  mutate(Section = factor(Section,levels=c("pre", "trial1","trial2", "post"), labels = c("pre", "block1","block2", "post"))) %>%
-  group_by(target) %>%
-  filter(Lex_Error == "no", Section == "pre" | Section == "post") %>%
-  select(target, Plural_Error, Section, Condition, Subject) %>%
-  group_by(Section, target, Condition) %>%
-  summarise(Plural_Error= mean(Plural_Error=="yes")) %>%
-  group_by(target) %>%
-  pivot_wider(names_from = Section, values_from = Plural_Error) %>%
-  mutate(Change = post - pre)
-```
-
-# Analyses without "leaves
-
-```{r}
-no_leaves <- trial_data %>%
-  filter(target != "leaves")
-
-contrasts(no_leaves$Condition) <- c(-0.5,0.5)
-
-pre_post_leaves <- no_leaves %>%
-  filter(Section %in% c("pre", "post")) %>%
-  mutate(Section = factor(Section, levels = c("pre","post"))) %>%
-  droplevels()
-
-contrasts(pre_post_leaves$Section) <- c(-0.5,0.5)
-```
-
-```{r}
-interaction_leaves <- glmer(Plural_Error ~ Condition * Section + (1 | Subject) + (1|target),  
-                             family = "binomial", 
-                             data = pre_post_leaves)
-summary(interaction_leaves)
-```
-
-```{r}
-compare_pre_leaves <- glmer(Plural_Error ~ Condition + (1 | Subject) + (1|target),  
-                             family = "binomial", 
-                             data = no_leaves %>% 
-                               filter(Section == "pre"))
-
-summary(compare_pre_leaves)
-```
-
-```{r}
-reformulation_model_leaves <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target),  
-                             family = "binomial", 
-                             data = no_leaves %>% 
-                               filter(Condition == "Reformulation")) 
-
-summary(reformulation_model_leaves)
-```
-
-```{r}
-repetition_model_leaves <- glmer(Plural_Error ~ Section + (1 | Subject) + (1|target), 
-                             family = "binomial", 
-                             data = no_leaves %>% 
-                               filter(Condition == "Repetition")) 
-
-summary(repetition_model_leaves)
-```
-
-```{r overall-learning-no-leaves}
-pre_post_matched_leaves <- pre_post_leaves %>%
-  select(Subject, Condition, Section, Type, Plural_Error, target) %>%
-  group_by(Subject, target) %>%
-  pivot_wider(names_from = Section, values_from = Plural_Error)
-
-pre_to_post_leaves <- glmer(post ~ pre + Condition + (1|Subject) + (1|target),
-                     family = "binomial", data = pre_post_matched)
-
-summary(pre_to_post_leaves)
 ```

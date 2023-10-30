@@ -7,7 +7,7 @@ editor_options:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-options(scipen = 1, digits = 3, dplyr.summarise.inform = FALSE)
+options(scipen = 1, digits = 5, dplyr.summarise.inform = FALSE)
 ```
 
 ```{r}
@@ -203,25 +203,27 @@ parent_responses <- annotated_contexts %>%
   group_by(context_id) %>%
   slice(2) %>%
   filter(speaker_role %in% c("Mother", "Father", "Adult", 
-                             "Grandmother", "Grandfather"))
+                             "Grandmother", "Grandfather")) %>%
+  mutate(age_years = factor(floor(target_child_age/12), levels = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9","10"))) %>%
+  filter(!is.na(gloss), !is.na(age_years))
+
+n_child <- length(unique(parent_responses$target_child_id))
 ```
 
 ### Organizing response counts by age
 ```{r parent-responses-by-age}
 responses_by_age <- parent_responses %>%
   mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE), other.true = ifelse(reform.true | replay, FALSE, TRUE)) %>%
-  mutate(age_years = factor(floor(target_child_age/12), levels = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9","10"))) %>%
-  filter(!is.na(gloss), !is.na(age_years), plural_type == "error") %>%
+  filter(plural_type == "error") %>%
   group_by(plural_type, age_years) %>%
-  summarise(replay = sum(replay, na.rm=TRUE), reformulation = 
-               sum(reform.true, na.rm=TRUE), other = sum(other.true, na.rm =TRUE)) %>%
+  summarise(n.errors = n(), replay = sum(replay, na.rm=TRUE),
+            reformulation = sum(reform.true, na.rm=TRUE), 
+            other = sum(other.true, na.rm =TRUE)) %>%
   ungroup() %>%
-  complete(plural_type, age_years, fill=list(n.children = 0, n.utterances = 0, replay = 0, reformulation = 0, other = 0))
+  complete(plural_type, age_years, fill=list(n.children = 0, n.utterances = 0, n.errors = 0, replay = 0, reformulation = 0, other = 0))
 
 all_utts_by_age <- parent_responses %>%
   mutate(reform.true = ifelse(is.na(reformulation), FALSE, TRUE), other.true = ifelse(reform.true | replay, FALSE, TRUE)) %>%
-  mutate(age_years = factor(floor(target_child_age/12), levels = c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9","10"))) %>%
-  filter(!is.na(gloss), !is.na(age_years)) %>%
   group_by(age_years) %>%
   summarise(n.children = n_distinct(target_child_id), n.utts = n())
 
@@ -259,7 +261,7 @@ n_child <- length(unique(up_to_four$target_child_id))
 n_utterances_four <- nrow(up_to_four)
 ```
 
-When only including children up to and including 4 years of age, there are `r n_utterances_four` utterances across `r n_child` children.
+When only including children up to and including 4 years of age, there are `r n_utterances_four` utterances. 
 
 ### T-tests comparing responses rates for both correct and incorrect utterances
 ```{r}
